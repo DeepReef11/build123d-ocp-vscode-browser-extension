@@ -66,7 +66,7 @@
       toastEl.id = "ocp-keybind-toast";
       Object.assign(toastEl.style, {
         position: "fixed",
-        top: "12px",
+        bottom: "24px",
         left: "50%",
         transform: "translateX(-50%)",
         padding: "8px 18px",
