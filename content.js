@@ -62,6 +62,7 @@
 
   var currentUnit = "mm";       // "mm" or "inch"
   var currentPrecision = 16;    // denominator: 8, 16, or 32
+  var useFeet = false;          // when true, show feet+inches for >= 12"
   var toolbarEl = null;
   var unitPollTimer = null;
   var cellMmCache = new WeakMap();   // cell -> mm value
@@ -98,8 +99,8 @@
       dispDenom = denominator / g;
     }
 
-    var feet = Math.floor(wholeInches / 12);
-    var inches = wholeInches % 12;
+    var feet = useFeet ? Math.floor(wholeInches / 12) : 0;
+    var inches = useFeet ? wholeInches % 12 : wholeInches;
 
     var parts = [];
     if (negative) parts.push("-");
@@ -294,6 +295,12 @@
       btn.style.display = currentUnit === "inch" ? "inline-block" : "none";
       styleToolbarButton(btn, denom === currentPrecision);
     }
+
+    var feetBtn = toolbarEl.querySelector("#ocp-feet-btn");
+    if (feetBtn) {
+      feetBtn.style.display = currentUnit === "inch" ? "inline-block" : "none";
+      styleToolbarButton(feetBtn, useFeet);
+    }
   }
 
   function createToolbar() {
@@ -345,6 +352,22 @@
         toolbarEl.appendChild(btn);
       })(PRECISIONS[p]);
     }
+
+    // Feet toggle (visible only in inch mode)
+    var feetBtn = document.createElement("button");
+    feetBtn.id = "ocp-feet-btn";
+    feetBtn.textContent = "ft";
+    feetBtn.style.pointerEvents = "auto";
+    styleToolbarButton(feetBtn, false);
+    feetBtn.style.display = "none";
+    feetBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      useFeet = !useFeet;
+      updateToolbar();
+      convertAllCells();
+      showToast("Feet: " + (useFeet ? "ON" : "OFF"), useFeet);
+    });
+    toolbarEl.appendChild(feetBtn);
 
     document.body.appendChild(toolbarEl);
     updateToolbar();
