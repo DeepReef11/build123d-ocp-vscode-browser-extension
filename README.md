@@ -11,6 +11,36 @@ Chrome extension that adds keyboard shortcuts to the [OCP CAD Viewer](https://gi
 | `u` | Toggle distance measurement |
 | `Shift+u` | Toggle properties panel |
 
+### Yank (Copy) Values
+
+Press `y` to open the which-key panel showing available yank commands.
+
+**Primary values:**
+| Key | Action |
+|-----|--------|
+| `yy` | Copy primary value (Center/XYZ coords, or distance) |
+| `yx` | Copy X component |
+| `yc` | Copy Y component (center) |
+| `yz` | Copy Z component |
+
+**Properties panel (Face):**
+| Key | Action |
+|-----|--------|
+| `ya` | Copy Area |
+| `yg` | Copy Angle to XY |
+| `yb` | Bounding box submenu → `m`in / `c`enter / `x`(max) / `s`ize |
+
+**Distance panel:**
+| Key | Action |
+|-----|--------|
+| `y1` | Copy Point 1 coords |
+| `y2` | Copy Point 2 coords |
+| `yd` | Copy Delta vector (X\|Y\|Z) |
+| `yn` | Copy angle |
+
+Copy buttons (📋) also appear next to values in panels for mouse-based copying.
+Individual X/Y/Z cells have their own small copy buttons.
+
 ### Camera Views
 
 | Key | Action |
