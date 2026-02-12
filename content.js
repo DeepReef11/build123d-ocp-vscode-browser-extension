@@ -24,17 +24,32 @@
     { key: "u", shift: false, selector: "input.tcv_button_distance", label: "Distance Measurement" },
     { key: "u", shift: true,  selector: "input.tcv_button_properties", label: "Properties" },
 
-    // Camera views (number keys → toolbar order)
-    { key: "0", shift: false, selector: "input.tcv_button_iso",    label: "Iso View" },
-    { key: "1", shift: false, selector: "input.tcv_button_front",  label: "Front View" },
-    { key: "2", shift: false, selector: "input.tcv_button_rear",   label: "Back View" },
-    { key: "3", shift: false, selector: "input.tcv_button_top",    label: "Top View" },
-    { key: "4", shift: false, selector: "input.tcv_button_bottom", label: "Bottom View" },
-    { key: "5", shift: false, selector: "input.tcv_button_left",   label: "Left View" },
-    { key: "6", shift: false, selector: "input.tcv_button_right",  label: "Right View" },
-
     // --- Add more bindings here ---
   ];
+
+  // Camera views: number + v
+  const VIEW_MAP = {
+    "0": { selector: "input.tcv_button_iso",    label: "Iso View" },
+    "1": { selector: "input.tcv_button_front",  label: "Front View" },
+    "2": { selector: "input.tcv_button_rear",   label: "Back View" },
+    "3": { selector: "input.tcv_button_top",    label: "Top View" },
+    "4": { selector: "input.tcv_button_bottom", label: "Bottom View" },
+    "5": { selector: "input.tcv_button_left",   label: "Left View" },
+    "6": { selector: "input.tcv_button_right",  label: "Right View" },
+  };
+
+  // v-prefix view options
+  const V_PREFIX_MAP = {
+    "t": { selector: "input.tcv_button_transparent", label: "Transparent", toggle: true },
+    "e": { selector: "input.tcv_button_blackedges", label: "Black Edges", toggle: true },
+    "g": { selector: "input.tcv_button_grid", label: "Grid", toggle: true },
+    "a": { selector: "input.tcv_button_axes", label: "Axes", toggle: true },
+    "o": { selector: "input.tcv_button_axes0", label: "Origin Axes", toggle: true },
+    "p": { selector: "input.tcv_button_perspective", label: "Perspective", toggle: true },
+    "x": { checkbox: "input.tcv_grid-xy", label: "Grid XY", toggle: true },
+    "y": { checkbox: "input.tcv_grid-xz", label: "Grid XZ", toggle: true },
+    "z": { checkbox: "input.tcv_grid-yz", label: "Grid YZ", toggle: true },
+  };
 
   // Build a lookup map: "shift+key" or "key" -> binding
   const KEY_MAP = {};
@@ -65,6 +80,16 @@
   const YANK_SEQUENCE_TIMEOUT_MS = 1500;
   var whichKeyEl = null;
   var whichKeyTimer = null;
+
+  // Number-prefix sequence state (for Nv, Nh, Ny, N{x|y|z}y sequences)
+  var numPrefix = "";     // buffered digit(s)
+  var numAxis = "";       // buffered axis letter (x, y, or z) for N{axis}y
+  var numPrefixTime = 0;
+  const NUM_PREFIX_TIMEOUT_MS = 1500;
+
+  // v-prefix sequence state (for vt, ve, vg, etc.)
+  var vPrefixActive = false;
+  var vPrefixTime = 0;
 
   // =========================================================================
   // Unit Conversion State (session-only, resets on page load)
@@ -580,7 +605,7 @@
         var zCell = row.querySelector(".tcv_z_measure_val");
         var hasCoords = xCell && yCell && zCell;
 
-        // Position a copy button at the right edge of the row header
+        // Position a copy button to the left of the row header
         var thRect = th.getBoundingClientRect();
 
         if (hasCoords) {
@@ -592,7 +617,7 @@
               copyCoords(r, lbl);
             });
             btn.style.top = (thRect.top + thRect.height / 2 - 8) + "px";
-            btn.style.left = (thRect.right + 4) + "px";
+            btn.style.left = (thRect.left - 24) + "px";
             container.appendChild(btn);
           })(row);
         } else {
@@ -604,7 +629,7 @@
               copySingleValue(r, lbl);
             });
             btn.style.top = (thRect.top + thRect.height / 2 - 8) + "px";
-            btn.style.left = (thRect.right + 4) + "px";
+            btn.style.left = (thRect.left - 24) + "px";
             container.appendChild(btn);
           })(row);
         }
@@ -620,277 +645,193 @@
   }
 
   // =========================================================================
-  // Yank Keybindings - Extended system with which-key support
+  // Yank Keybindings - Row-based system
+  //
+  // Sequences:
+  //   yy         — yank primary value (first row of visible panel)
+  //   0y         — yank whole table as text
+  //   Ny         — yank row N values (comma-separated if xyz)
+  //   N{x|y|z}y  — yank specific axis of row N ("Wrong yank" if single-value row)
+  //
+  // Number prefix is handled by the existing numPrefix system in handleKeyDown.
   // =========================================================================
 
-  // Find row by label text in a panel (case-insensitive partial match)
-  function findRowByLabel(panel, labelMatch) {
+  // Get the visible panel (distance takes priority over properties)
+  function getVisiblePanel() {
+    var distPanel = document.querySelector(DISTANCE_PANEL_SELECTOR);
+    if (distPanel && distPanel.style.display !== "none") return distPanel;
+    var propPanel = document.querySelector(PROPERTIES_PANEL_SELECTOR);
+    if (propPanel && propPanel.style.display !== "none") return propPanel;
+    return null;
+  }
+
+  // Get all data rows from a panel's table
+  function getPanelRows(panel) {
+    if (!panel) return [];
     var rows = panel.querySelectorAll("tr");
+    var result = [];
     for (var i = 0; i < rows.length; i++) {
       var th = rows[i].querySelector("th.tcv_measure_key");
-      if (th && th.textContent.toLowerCase().indexOf(labelMatch.toLowerCase()) !== -1) {
-        return rows[i];
+      if (th) result.push(rows[i]);
+    }
+    return result;
+  }
+
+  // Get row label text
+  function getRowLabel(row) {
+    var th = row.querySelector("th.tcv_measure_key");
+    return th ? th.textContent.trim() : "";
+  }
+
+  // Check if a row has xyz coordinate cells
+  function rowHasCoords(row) {
+    return row.querySelector(".tcv_x_measure_val") &&
+           row.querySelector(".tcv_y_measure_val") &&
+           row.querySelector(".tcv_z_measure_val");
+  }
+
+  // Format row values as text: "label: value" or "label: x, y, z"
+  function formatRowText(row) {
+    var label = getRowLabel(row);
+    if (rowHasCoords(row)) {
+      var x = getCellValue(row.querySelector(".tcv_x_measure_val"));
+      var y = getCellValue(row.querySelector(".tcv_y_measure_val"));
+      var z = getCellValue(row.querySelector(".tcv_z_measure_val"));
+      return label + ": " + x.toFixed(3) + ", " + y.toFixed(3) + ", " + z.toFixed(3);
+    }
+    // Single value
+    var cells = row.querySelectorAll(".tcv_measure_val");
+    for (var i = 0; i < cells.length; i++) {
+      var cell = cells[i];
+      if (!cell.classList.contains("tcv_x_measure_val") &&
+          !cell.classList.contains("tcv_y_measure_val") &&
+          !cell.classList.contains("tcv_z_measure_val")) {
+        var val = getCellValue(cell);
+        return label + ": " + val.toFixed(3);
       }
     }
-    return null;
+    return label + ": ?";
   }
 
-  // Get the primary row for current panel (Center/XYZ for properties, distance for distance panel)
-  function getPrimaryRow() {
-    var distPanel = document.querySelector(DISTANCE_PANEL_SELECTOR);
-    var propPanel = document.querySelector(PROPERTIES_PANEL_SELECTOR);
-
-    if (distPanel && distPanel.style.display !== "none") {
-      return { panel: distPanel, row: findRowByLabel(distPanel, "distance"), label: "distance", isCoords: false };
+  // Format row values only (no label): "value" or "x, y, z"
+  function formatRowValues(row) {
+    if (rowHasCoords(row)) {
+      var x = getCellValue(row.querySelector(".tcv_x_measure_val"));
+      var y = getCellValue(row.querySelector(".tcv_y_measure_val"));
+      var z = getCellValue(row.querySelector(".tcv_z_measure_val"));
+      return x.toFixed(3) + ", " + y.toFixed(3) + ", " + z.toFixed(3);
     }
-    if (propPanel && propPanel.style.display !== "none") {
-      // Check for XYZ (vertex) first, then Center (face)
-      var xyzRow = findRowByLabel(propPanel, "xyz");
-      if (xyzRow) return { panel: propPanel, row: xyzRow, label: "XYZ", isCoords: true };
-      var centerRow = findRowByLabel(propPanel, "center");
-      if (centerRow) return { panel: propPanel, row: centerRow, label: "Center", isCoords: true };
+    var cells = row.querySelectorAll(".tcv_measure_val");
+    for (var i = 0; i < cells.length; i++) {
+      var cell = cells[i];
+      if (!cell.classList.contains("tcv_x_measure_val") &&
+          !cell.classList.contains("tcv_y_measure_val") &&
+          !cell.classList.contains("tcv_z_measure_val")) {
+        return getCellValue(cell).toFixed(3);
+      }
     }
-    return null;
+    return "?";
   }
 
-  // Copy single axis from a row
-  function copySingleAxis(row, axis, label) {
-    var cellClass = ".tcv_" + axis.toLowerCase() + "_measure_val";
-    var cell = row.querySelector(cellClass);
-    if (!cell) {
-      showToast(axis + " not found", false);
-      return false;
+  // Yank whole table as formatted text (0y)
+  function yankWholeTable() {
+    var panel = getVisiblePanel();
+    if (!panel) {
+      showToast("No panel visible", false);
+      return;
     }
-    var val = getCellValue(cell);
-    var text = val.toFixed(3);
+    var rows = getPanelRows(panel);
+    var lines = [];
+    for (var i = 0; i < rows.length; i++) {
+      lines.push(formatRowText(rows[i]));
+    }
+    var text = lines.join("\n");
     navigator.clipboard.writeText(text).then(function () {
-      showToast("Copied " + label + " " + axis + ": " + text, true);
+      showToast("Copied table (" + rows.length + " rows)", true);
     }).catch(function () {
       showToast("Copy failed", false);
     });
-    return true;
   }
 
-  // Yank command handlers for different sequences
-  var yankHandlers = {
-    // Primary value: yy = full coords or distance
-    "y": function () {
-      var primary = getPrimaryRow();
-      if (!primary || !primary.row) {
-        showToast("No panel visible", false);
-        return false;
-      }
-      if (primary.isCoords) {
-        copyCoords(primary.row, primary.label);
-      } else {
-        copySingleValue(primary.row, primary.label);
-      }
-      return true;
-    },
-
-    // Individual axes of primary: yx, yc (y-center), yz
-    "x": function () {
-      var primary = getPrimaryRow();
-      if (!primary || !primary.row || !primary.isCoords) {
-        showToast("No coordinates available", false);
-        return false;
-      }
-      return copySingleAxis(primary.row, "X", primary.label);
-    },
-    "c": function () {  // 'c' for center/Y axis
-      var primary = getPrimaryRow();
-      if (!primary || !primary.row || !primary.isCoords) {
-        showToast("No coordinates available", false);
-        return false;
-      }
-      return copySingleAxis(primary.row, "Y", primary.label);
-    },
-    "z": function () {
-      var primary = getPrimaryRow();
-      if (!primary || !primary.row || !primary.isCoords) {
-        showToast("No coordinates available", false);
-        return false;
-      }
-      return copySingleAxis(primary.row, "Z", primary.label);
-    },
-
-    // Area and Angle
-    "a": function () {
-      var propPanel = document.querySelector(PROPERTIES_PANEL_SELECTOR);
-      if (!propPanel || propPanel.style.display === "none") {
-        showToast("Properties panel not visible", false);
-        return false;
-      }
-      var row = findRowByLabel(propPanel, "area");
-      if (row) {
-        copySingleValue(row, "Area");
-        return true;
-      }
-      showToast("Area not found", false);
-      return false;
-    },
-    "g": function () {  // 'g' for angle (a is taken)
-      var propPanel = document.querySelector(PROPERTIES_PANEL_SELECTOR);
-      if (!propPanel || propPanel.style.display === "none") {
-        showToast("Properties panel not visible", false);
-        return false;
-      }
-      var row = findRowByLabel(propPanel, "angle");
-      if (row) {
-        copySingleValue(row, "Angle");
-        return true;
-      }
-      showToast("Angle not found", false);
-      return false;
-    },
-
-    // Distance panel points
-    "1": function () {
-      var distPanel = document.querySelector(DISTANCE_PANEL_SELECTOR);
-      if (!distPanel || distPanel.style.display === "none") {
-        showToast("Distance panel not visible", false);
-        return false;
-      }
-      var row = findRowByLabel(distPanel, "point 1");
-      if (row) {
-        copyCoords(row, "Point 1");
-        return true;
-      }
-      showToast("Point 1 not found", false);
-      return false;
-    },
-    "2": function () {
-      var distPanel = document.querySelector(DISTANCE_PANEL_SELECTOR);
-      if (!distPanel || distPanel.style.display === "none") {
-        showToast("Distance panel not visible", false);
-        return false;
-      }
-      var row = findRowByLabel(distPanel, "point 2");
-      if (row) {
-        copyCoords(row, "Point 2");
-        return true;
-      }
-      showToast("Point 2 not found", false);
-      return false;
-    },
-
-    // Delta vector (⇒ X | Y | Z)
-    "d": function () {
-      var distPanel = document.querySelector(DISTANCE_PANEL_SELECTOR);
-      if (!distPanel || distPanel.style.display === "none") {
-        showToast("Distance panel not visible", false);
-        return false;
-      }
-      var row = findRowByLabel(distPanel, "⇒");
-      if (row) {
-        copyCoords(row, "Delta");
-        return true;
-      }
-      showToast("Delta not found", false);
-      return false;
-    },
-
-    // Distance angle
-    "n": function () {  // 'n' for angle in distance panel
-      var distPanel = document.querySelector(DISTANCE_PANEL_SELECTOR);
-      if (!distPanel || distPanel.style.display === "none") {
-        showToast("Distance panel not visible", false);
-        return false;
-      }
-      var row = findRowByLabel(distPanel, "angle");
-      if (row) {
-        copySingleValue(row, "Angle");
-        return true;
-      }
-      showToast("Angle not found", false);
-      return false;
+  // Yank row N values (Ny)
+  function yankRowN(n) {
+    var panel = getVisiblePanel();
+    if (!panel) {
+      showToast("No panel visible", false);
+      return;
     }
-  };
-
-  // Bounding box sub-handlers (after 'yb')
-  var bbHandlers = {
-    "m": function () {  // min
-      var propPanel = document.querySelector(PROPERTIES_PANEL_SELECTOR);
-      if (!propPanel || propPanel.style.display === "none") {
-        showToast("Properties panel not visible", false);
-        return false;
-      }
-      var row = findRowByLabel(propPanel, "bb min");
-      if (row) {
-        copyCoords(row, "BB min");
-        return true;
-      }
-      showToast("BB min not found", false);
-      return false;
-    },
-    "c": function () {  // center
-      var propPanel = document.querySelector(PROPERTIES_PANEL_SELECTOR);
-      if (!propPanel || propPanel.style.display === "none") {
-        showToast("Properties panel not visible", false);
-        return false;
-      }
-      var row = findRowByLabel(propPanel, "bb center");
-      if (row) {
-        copyCoords(row, "BB center");
-        return true;
-      }
-      showToast("BB center not found", false);
-      return false;
-    },
-    "x": function () {  // max
-      var propPanel = document.querySelector(PROPERTIES_PANEL_SELECTOR);
-      if (!propPanel || propPanel.style.display === "none") {
-        showToast("Properties panel not visible", false);
-        return false;
-      }
-      var row = findRowByLabel(propPanel, "bb max");
-      if (row) {
-        copyCoords(row, "BB max");
-        return true;
-      }
-      showToast("BB max not found", false);
-      return false;
-    },
-    "s": function () {  // size
-      var propPanel = document.querySelector(PROPERTIES_PANEL_SELECTOR);
-      if (!propPanel || propPanel.style.display === "none") {
-        showToast("Properties panel not visible", false);
-        return false;
-      }
-      var row = findRowByLabel(propPanel, "bb size");
-      if (row) {
-        copyCoords(row, "BB size");
-        return true;
-      }
-      showToast("BB size not found", false);
-      return false;
+    var rows = getPanelRows(panel);
+    if (n < 1 || n > rows.length) {
+      showToast("Row " + n + " not found (only " + rows.length + " rows)", false);
+      return;
     }
-  };
+    var row = rows[n - 1];
+    var label = getRowLabel(row);
+    var values = formatRowValues(row);
+    navigator.clipboard.writeText(values).then(function () {
+      showToast("Copied " + label + ": " + values, true);
+    }).catch(function () {
+      showToast("Copy failed", false);
+    });
+  }
 
-  // Process yank sequence and execute if complete
-  function processYankSequence(seq) {
-    if (seq.length === 0) return false;
-
-    // Check for 'b' prefix (bounding box submenu)
-    if (seq[0] === "b") {
-      if (seq.length === 1) {
-        // Show BB submenu
-        return "bb";  // signal to show BB which-key
-      }
-      if (seq.length === 2 && bbHandlers[seq[1]]) {
-        bbHandlers[seq[1]]();
-        return true;
-      }
-      return false;  // invalid
+  // Yank specific axis of row N (N{x|y|z}y)
+  function yankRowAxis(n, axis) {
+    var panel = getVisiblePanel();
+    if (!panel) {
+      showToast("No panel visible", false);
+      return;
     }
-
-    // Single key handlers
-    if (seq.length === 1 && yankHandlers[seq[0]]) {
-      yankHandlers[seq[0]]();
-      return true;
+    var rows = getPanelRows(panel);
+    if (n < 1 || n > rows.length) {
+      showToast("Row " + n + " not found (only " + rows.length + " rows)", false);
+      return;
     }
+    var row = rows[n - 1];
+    if (!rowHasCoords(row)) {
+      navigator.clipboard.writeText("Wrong yank").then(function () {
+        showToast("Wrong yank — single value row", false);
+      }).catch(function () {
+        showToast("Copy failed", false);
+      });
+      return;
+    }
+    var cellClass = ".tcv_" + axis + "_measure_val";
+    var cell = row.querySelector(cellClass);
+    if (!cell) {
+      showToast(axis.toUpperCase() + " not found", false);
+      return;
+    }
+    var val = getCellValue(cell);
+    var text = val.toFixed(3);
+    var label = getRowLabel(row);
+    navigator.clipboard.writeText(text).then(function () {
+      showToast("Copied " + label + " " + axis.toUpperCase() + ": " + text, true);
+    }).catch(function () {
+      showToast("Copy failed", false);
+    });
+  }
 
-    return false;  // not a valid sequence
+  // Yank primary value (yy) — first row of visible panel
+  function yankPrimary() {
+    var panel = getVisiblePanel();
+    if (!panel) {
+      showToast("No panel visible", false);
+      return;
+    }
+    var rows = getPanelRows(panel);
+    if (rows.length === 0) {
+      showToast("No data rows", false);
+      return;
+    }
+    var row = rows[0];
+    var label = getRowLabel(row);
+    var values = formatRowValues(row);
+    navigator.clipboard.writeText(values).then(function () {
+      showToast("Copied " + label + ": " + values, true);
+    }).catch(function () {
+      showToast("Copy failed", false);
+    });
   }
 
   // =========================================================================
@@ -957,58 +898,46 @@
 
     var html = "";
 
-    if (mode === "bb") {
-      // Bounding box submenu
-      html = '<div style="color: #888; margin-bottom: 6px; font-size: 11px;">Yank BB:</div>';
+    if (mode === "view") {
+      // View prefix menu
+      html = '<div style="color: #888; margin-bottom: 6px; font-size: 11px;">View:</div>';
       html += '<div style="display: flex; gap: 16px;">';
       html += '<div>';
-      html += renderWhichKeyOption("m", "min", !propVisible);
-      html += renderWhichKeyOption("c", "center", !propVisible);
+      html += renderWhichKeyOption("t", "Transparent", false);
+      html += renderWhichKeyOption("e", "Black Edges", false);
+      html += renderWhichKeyOption("a", "Axes", false);
+      html += renderWhichKeyOption("o", "Origin Axes", false);
+      html += renderWhichKeyOption("p", "Perspective", false);
       html += '</div><div>';
-      html += renderWhichKeyOption("x", "max", !propVisible);
-      html += renderWhichKeyOption("s", "size", !propVisible);
-      html += '</div></div>';
+      html += renderWhichKeyOption("g", "Grid", false);
+      html += renderWhichKeyOption("x", "Grid XY", false);
+      html += renderWhichKeyOption("y", "Grid XZ", false);
+      html += renderWhichKeyOption("z", "Grid YZ", false);
+      html += '</div>';
+      html += '</div>';
+    } else if (mode === "numprefix") {
+      // Number prefix menu — show what the digit can do
+      html = '<div style="color: #888; margin-bottom: 6px; font-size: 11px;">' + numPrefix + ' +</div>';
+      html += '<div>';
+      html += renderWhichKeyOption("v", "View", false);
+      html += renderWhichKeyOption("h", "Hide/Show", false);
+      html += renderWhichKeyOption("y", "Yank row", false);
+      html += renderWhichKeyOption("x", "Yank X then y", false);
+      html += '</div>';
+    } else if (mode === "numaxis") {
+      // Number + axis, waiting for 'y' to confirm
+      html = '<div style="color: #888; margin-bottom: 6px; font-size: 11px;">' + numPrefix + numAxis + ' +</div>';
+      html += '<div>';
+      html += renderWhichKeyOption("y", "Yank", false);
+      html += '</div>';
     } else {
-      // Main yank menu
-      var primary = getPrimaryRow();
-      var primaryLabel = primary ? primary.label : (distVisible ? "distance" : "Center/XYZ");
-      var hasCoords = primary && primary.isCoords;
-
+      // yy — just show that y yanks primary
+      var visPanel = getVisiblePanel();
+      var rows = visPanel ? getPanelRows(visPanel) : [];
+      var firstLabel = rows.length > 0 ? getRowLabel(rows[0]) : "?";
       html = '<div style="color: #888; margin-bottom: 6px; font-size: 11px;">Yank:</div>';
-      html += '<div style="display: flex; gap: 16px;">';
-
-      // Left column - primary and axes
       html += '<div>';
-      html += renderWhichKeyOption("y", primaryLabel, !primary);
-      if (hasCoords) {
-        html += renderWhichKeyOption("x", "X", false);
-        html += renderWhichKeyOption("c", "Y", false);
-        html += renderWhichKeyOption("z", "Z", false);
-      }
-      html += '</div>';
-
-      // Middle column - properties specific
-      html += '<div>';
-      if (panelType === "face") {
-        html += renderWhichKeyOption("a", "Area", false);
-        html += renderWhichKeyOption("g", "Angle", false);
-        html += renderWhichKeyOption("b", "BB →", false);
-      } else if (panelType === "vertex") {
-        html += renderWhichKeyOption("b", "BB →", true);
-      } else if (distVisible) {
-        html += renderWhichKeyOption("d", "Delta", false);
-        html += renderWhichKeyOption("n", "Angle", false);
-      }
-      html += '</div>';
-
-      // Right column - distance points
-      html += '<div>';
-      if (distVisible) {
-        html += renderWhichKeyOption("1", "Point 1", false);
-        html += renderWhichKeyOption("2", "Point 2", false);
-      }
-      html += '</div>';
-
+      html += renderWhichKeyOption("y", firstLabel, rows.length === 0);
       html += '</div>';
     }
 
@@ -1016,12 +945,30 @@
     panel.style.opacity = "1";
 
     // Auto-hide after timeout
+    var timeout = (mode === "view" || mode === "numprefix" || mode === "numaxis")
+                    ? NUM_PREFIX_TIMEOUT_MS : YANK_SEQUENCE_TIMEOUT_MS;
     if (whichKeyTimer) clearTimeout(whichKeyTimer);
     whichKeyTimer = setTimeout(function () {
+      // If axis was 'y' and timed out, treat as row yank (Ny)
+      if (numAxis === "y" && numPrefix !== "") {
+        var num = parseInt(numPrefix, 10);
+        numPrefix = "";
+        numAxis = "";
+        hideWhichKey();
+        if (num === 0) {
+          yankWholeTable();
+        } else {
+          yankRowN(num);
+        }
+        return;
+      }
       hideWhichKey();
       yankSequence = [];
       lastKeyTime = 0;
-    }, YANK_SEQUENCE_TIMEOUT_MS);
+      numPrefix = "";
+      numAxis = "";
+      vPrefixActive = false;
+    }, timeout);
   }
 
   function hideWhichKey() {
@@ -1032,6 +979,100 @@
       clearTimeout(whichKeyTimer);
       whichKeyTimer = null;
     }
+  }
+
+  // =========================================================================
+  // Tree Node Hide/Show (Nh = toggle Nth node, 0h = toggle all)
+  // =========================================================================
+
+  function getTreeNodes() {
+    // Get direct child nodes under the top-level group
+    var container = document.querySelector(".tcv_cad_tree_container");
+    if (!container) return [];
+
+    // The top-level node is always /Group — its children are the actual shapes
+    var topNode = container.querySelector('.tv-tree-node[data-path="/Group"]');
+    if (!topNode) {
+      // Fallback: try the first top-level node
+      topNode = container.querySelector(".tv-tree-node");
+    }
+    if (!topNode) return [];
+
+    var childrenContainer = topNode.querySelector(".tv-children");
+    if (!childrenContainer) return [];
+
+    // Direct child .tv-tree-node elements
+    var nodes = [];
+    var children = childrenContainer.children;
+    for (var i = 0; i < children.length; i++) {
+      if (children[i].classList.contains("tv-tree-node")) {
+        nodes.push(children[i]);
+      }
+    }
+    return nodes;
+  }
+
+  function toggleTreeNodeVisibility(node) {
+    // Click the shape icon (.tv-icon0) to toggle visibility
+    var icon = node.querySelector(".tv-node-content .tv-icon0");
+    if (icon) {
+      icon.click();
+      return true;
+    }
+    return false;
+  }
+
+  function getTreeNodeLabel(node) {
+    var label = node.querySelector(".tv-node-label");
+    if (!label) return "?";
+    // Get text without the colored dot span
+    var text = "";
+    for (var i = 0; i < label.childNodes.length; i++) {
+      if (label.childNodes[i].nodeType === Node.TEXT_NODE) {
+        text += label.childNodes[i].textContent;
+      }
+    }
+    return text.trim() || label.textContent.trim();
+  }
+
+  function isTreeNodeVisible(node) {
+    var icon = node.querySelector(".tv-node-content .tv-icon0");
+    if (!icon) return false;
+    // If the icon has tcv_button_shape (not _no or _mix), it's visible
+    return icon.classList.contains("tcv_button_shape");
+  }
+
+  function handleHideByNumber(num) {
+    if (num === 0) {
+      // Toggle all: click the top-level Group's shape icon
+      var container = document.querySelector(".tcv_cad_tree_container");
+      if (!container) {
+        showToast("No CAD tree found", false);
+        return;
+      }
+      var topNode = container.querySelector('.tv-tree-node[data-path="/Group"]');
+      if (!topNode) topNode = container.querySelector(".tv-tree-node");
+      if (!topNode) {
+        showToast("No tree node found", false);
+        return;
+      }
+      var toggled = toggleTreeNodeVisibility(topNode);
+      if (toggled) {
+        showToast("Toggle All", true);
+      }
+      return;
+    }
+
+    var nodes = getTreeNodes();
+    if (num > nodes.length) {
+      showToast("Node " + num + " not found (only " + nodes.length + " nodes)", false);
+      return;
+    }
+    var node = nodes[num - 1];
+    var label = getTreeNodeLabel(node);
+    var wasVisible = isTreeNodeVisible(node);
+    toggleTreeNodeVisibility(node);
+    showToast(label + (wasVisible ? " hidden" : " shown"), !wasVisible);
   }
 
   // =========================================================================
@@ -1117,48 +1158,184 @@
     var pressed = event.key.toLowerCase();
     var now = Date.now();
 
-    // --- Yank keybind sequences ---
-    // Check if we're in a yank sequence (started with 'y')
-    if (yankSequence.length > 0) {
-      // Check timeout
-      if ((now - lastKeyTime) >= YANK_SEQUENCE_TIMEOUT_MS) {
-        // Sequence timed out, reset
-        yankSequence = [];
-        hideWhichKey();
-      } else {
-        // Add key to sequence and try to process
-        yankSequence.push(pressed);
-        lastKeyTime = now;
+    // --- v-prefix sequences (vt, ve, vg, vx, vy, vz, va, vo) ---
+    if (vPrefixActive) {
+      vPrefixActive = false;
+      hideWhichKey();
 
-        // Process sequence (skip the initial 'y' marker)
-        var seqAfterY = yankSequence.slice(1);
-        var result = processYankSequence(seqAfterY);
-        if (result === true) {
-          // Sequence completed successfully
-          yankSequence = [];
-          hideWhichKey();
-          return;
-        } else if (result === "bb") {
-          // Show BB submenu
-          showWhichKey("bb");
-          return;
-        } else if (result === false && seqAfterY.length >= 2) {
-          // Invalid sequence, reset
-          yankSequence = [];
-          hideWhichKey();
-          showToast("Invalid yank sequence", false);
+      if ((now - vPrefixTime) >= NUM_PREFIX_TIMEOUT_MS) {
+        // Timed out, fall through
+      } else {
+        var vBinding = V_PREFIX_MAP[pressed];
+        if (vBinding) {
+          if (vBinding.checkbox) {
+            // Grid plane checkbox — toggle it
+            var cb = document.querySelector(vBinding.checkbox);
+            if (cb) {
+              cb.click();
+              showToast(vBinding.label + (cb.checked ? " ON" : " OFF"), cb.checked);
+            } else {
+              showToast(vBinding.label + " — not found", false);
+            }
+          } else {
+            var btn = findButton(vBinding.selector);
+            if (btn) {
+              btn.click();
+              var active = isButtonActive(btn);
+              showToast(vBinding.label + (active ? " ON" : " OFF"), active);
+            } else {
+              showToast(vBinding.label + " — not found", false);
+            }
+          }
           return;
         }
-        // Sequence still building, keep waiting
+        showToast("Unknown view command: v" + pressed, false);
         return;
       }
     }
 
-    // Start yank sequence with 'y'
-    if (pressed === "y") {
-      yankSequence = ["y"];  // Mark that we're in yank mode, waiting for next key
+    // --- Number-prefix sequences (Nv = view, Nh = hide, Ny = yank, N{x|y|z}y = yank axis) ---
+    if (numPrefix !== "") {
+      if ((now - numPrefixTime) >= NUM_PREFIX_TIMEOUT_MS) {
+        // Timed out — if axis was 'y', treat as row yank before resetting
+        if (numAxis === "y") {
+          var num = parseInt(numPrefix, 10);
+          numPrefix = "";
+          numAxis = "";
+          hideWhichKey();
+          if (num === 0) {
+            yankWholeTable();
+          } else {
+            yankRowN(num);
+          }
+          return;
+        }
+        numPrefix = "";
+        numAxis = "";
+        hideWhichKey();
+      } else {
+        // If we already have an axis buffered, only 'y' completes it
+        if (numAxis !== "") {
+          if (pressed === "y") {
+            var num = parseInt(numPrefix, 10);
+            var axis = numAxis;
+            numPrefix = "";
+            numAxis = "";
+            hideWhichKey();
+            yankRowAxis(num, axis);
+            return;
+          }
+          // Not 'y' — if axis was 'y' (ambiguous Ny), treat as row yank
+          // and reprocess current key
+          if (numAxis === "y") {
+            var num = parseInt(numPrefix, 10);
+            numPrefix = "";
+            numAxis = "";
+            hideWhichKey();
+            if (num === 0) {
+              yankWholeTable();
+            } else {
+              yankRowN(num);
+            }
+            // Don't return — let the current key fall through to be processed
+          } else {
+            // Invalid axis sequence (e.g. 2xh), reset
+            numPrefix = "";
+            numAxis = "";
+            hideWhichKey();
+            showToast("Invalid yank sequence", false);
+            return;
+          }
+        }
+
+        if (pressed === "v") {
+          // Camera view: Nv
+          var num = numPrefix;
+          numPrefix = "";
+          hideWhichKey();
+          var view = VIEW_MAP[num];
+          if (view) {
+            var btn = findButton(view.selector);
+            if (btn) {
+              btn.click();
+              showToast(view.label, true);
+            } else {
+              showToast(view.label + " — not found", false);
+            }
+          } else {
+            showToast("No view for " + num, false);
+          }
+          return;
+        }
+        if (pressed === "h") {
+          // Hide/show tree node: Nh
+          var num = parseInt(numPrefix, 10);
+          numPrefix = "";
+          hideWhichKey();
+          handleHideByNumber(num);
+          return;
+        }
+        // Axis letter (x, y, z) — buffer it, wait for 'y' to confirm
+        if (pressed === "x" || pressed === "y" || pressed === "z") {
+          numAxis = pressed;
+          numPrefixTime = now;
+          showWhichKey("numaxis");
+          return;
+        }
+        // Additional digit — append (for nodes > 9)
+        if (pressed >= "0" && pressed <= "9") {
+          numPrefix += pressed;
+          numPrefixTime = now;
+          showWhichKey("numprefix");
+          return;
+        }
+        // Invalid follow-up, reset
+        numPrefix = "";
+        hideWhichKey();
+        // Fall through to process this key normally
+      }
+    }
+
+    // --- Yank: yy = yank primary (first row) ---
+    if (yankSequence.length > 0) {
+      if ((now - lastKeyTime) >= YANK_SEQUENCE_TIMEOUT_MS) {
+        yankSequence = [];
+        hideWhichKey();
+      } else {
+        if (pressed === "y") {
+          yankSequence = [];
+          hideWhichKey();
+          yankPrimary();
+          return;
+        }
+        // Invalid after 'y' (not another 'y'), reset
+        yankSequence = [];
+        hideWhichKey();
+        // Fall through to process this key normally
+      }
+    }
+
+    // Start yank sequence with 'y' (only when no number prefix active)
+    if (pressed === "y" && !event.shiftKey) {
+      yankSequence = ["y"];
       lastKeyTime = now;
       showWhichKey();
+      return;
+    }
+
+    // Start v-prefix sequence
+    if (pressed === "v" && !event.shiftKey) {
+      vPrefixActive = true;
+      vPrefixTime = now;
+      showWhichKey("view");
+      return;
+    }
+
+    // Start number-prefix sequence
+    if (pressed >= "0" && pressed <= "9" && !event.shiftKey) {
+      numPrefix = pressed;
+      numPrefixTime = now;
+      showWhichKey("numprefix");
       return;
     }
 
@@ -1195,17 +1372,8 @@
 
     button.click();
 
-    // Toggle buttons show ON/OFF; one-shot buttons (views) just show the label
-    var frame = button.closest(FRAME_SELECTOR);
-    var isToggle = frame && frame.classList.contains(ACTIVE_CLASS) !== undefined;
     var wasToggled = isButtonActive(button);
-
-    // View buttons don't have a persistent active state — just confirm the action
-    if (binding.selector.match(/_(iso|front|rear|top|bottom|left|right)$/)) {
-      showToast(binding.label, true);
-    } else {
-      showToast(binding.label + (wasToggled ? " ON" : " OFF"), wasToggled);
-    }
+    showToast(binding.label + (wasToggled ? " ON" : " OFF"), wasToggled);
   }
 
   // =========================================================================
@@ -1234,11 +1402,11 @@
       createToolbar();
       startCopyBtnPoll();
       console.log(
-        "[OCP Keybindings] Ready. Registered keys: " +
+        "[OCP Keybindings] Ready. Keys: " +
           KEYBINDINGS.map(function (b) {
-            return b.key.toUpperCase() + "=" + b.label;
+            return (b.shift ? "Shift+" : "") + b.key.toUpperCase() + "=" + b.label;
           }).join(", ") +
-          ", I=Toggle mm/inch, Shift+I=Cycle precision"
+          ", Nv=View, Nh=Hide/Show, v+=View options, y+=Yank, I=mm/inch"
       );
     }
 
